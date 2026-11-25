@@ -873,6 +873,15 @@ const (
 			DO UPDATE SET expires_at = $4
 			WHERE %[1]s.expires_at <= $5;`
 
+	queryFmtSelectOAuth2OneTimeConsumed = `
+		SELECT COUNT(*)
+		FROM %s
+		WHERE type = ? AND client_id = ? AND signature = ? AND expires_at > ?;`
+
+	queryFmtDeleteOAuth2OneTime = `
+		DELETE FROM %s
+		WHERE type = ? AND client_id = ? AND signature = ?;`
+
 	//nolint:gosec // Not a Credential.
 	queryFmtUpdateOAuth2RefreshTokenSessionRequest = `
 		UPDATE %s

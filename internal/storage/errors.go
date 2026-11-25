@@ -62,6 +62,10 @@ var (
 	// ErrNoRowsAffected is returned when a query which should affect rows affects none.
 	ErrNoRowsAffected = errors.New("no rows affected")
 
+	// ErrOAuth2OneTimeTypeNotDeclared is returned when a single-use value is presented with a type which has not been
+	// declared. This is a fail-closed error so a new type can not silently become reusable.
+	ErrOAuth2OneTimeTypeNotDeclared = errors.New("the oauth2 one-time value type is not declared")
+
 	// ErrMultipleRowsAffected is returned when a query which should affect a single row affects several.
 	ErrMultipleRowsAffected = errors.New("multiple rows affected")
 )

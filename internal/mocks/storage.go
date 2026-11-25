@@ -135,6 +135,23 @@ func (mr *MockStorageMockRecorder) ConsumeOneTimeCode(ctx, code any) *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ConsumeOneTimeCode", reflect.TypeOf((*MockStorage)(nil).ConsumeOneTimeCode), ctx, code)
 }
 
+// ConsumeOAuth2OneTime mocks base method.
+func (m *MockStorage) ConsumeOAuth2OneTime(ctx context.Context, oneTime any, args ...any) error {
+	m.ctrl.T.Helper()
+	varArgs := []any{ctx, oneTime}
+	varArgs = append(varArgs, args...)
+	ret := m.ctrl.Call(m, "ConsumeOAuth2OneTime", varArgs...)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ConsumeOAuth2OneTime indicates an expected call of ConsumeOAuth2OneTime.
+func (mr *MockStorageMockRecorder) ConsumeOAuth2OneTime(ctx, oneTime any, args ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varArgs := append([]any{ctx, oneTime}, args...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ConsumeOAuth2OneTime", reflect.TypeOf((*MockStorage)(nil).ConsumeOAuth2OneTime), varArgs...)
+}
+
 // ConsumeRecoveryCode mocks base method.
 func (m *MockStorage) ConsumeRecoveryCode(ctx context.Context, id int, ip model.NullIP) error {
 	m.ctrl.T.Helper()
@@ -1389,6 +1406,35 @@ func (m *MockStorage) SaveOAuth2RequestReplay(ctx context.Context, replay model.
 func (mr *MockStorageMockRecorder) SaveOAuth2RequestReplay(ctx, replay any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveOAuth2RequestReplay", reflect.TypeOf((*MockStorage)(nil).SaveOAuth2RequestReplay), ctx, replay)
+}
+
+// IsOAuth2OneTimeConsumed mocks base method.
+func (m *MockStorage) IsOAuth2OneTimeConsumed(ctx context.Context, oneTimeType model.OAuth2OneTimeType, clientID, signature string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsOAuth2OneTimeConsumed", ctx, oneTimeType, clientID, signature)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// IsOAuth2OneTimeConsumed indicates an expected call of IsOAuth2OneTimeConsumed.
+func (mr *MockStorageMockRecorder) IsOAuth2OneTimeConsumed(ctx, oneTimeType, clientID, signature any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsOAuth2OneTimeConsumed", reflect.TypeOf((*MockStorage)(nil).IsOAuth2OneTimeConsumed), ctx, oneTimeType, clientID, signature)
+}
+
+// SaveOAuth2OneTime mocks base method.
+func (m *MockStorage) SaveOAuth2OneTime(ctx context.Context, oneTime model.OAuth2OneTime) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SaveOAuth2OneTime", ctx, oneTime)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SaveOAuth2OneTime indicates an expected call of SaveOAuth2OneTime.
+func (mr *MockStorageMockRecorder) SaveOAuth2OneTime(ctx, oneTime any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveOAuth2OneTime", reflect.TypeOf((*MockStorage)(nil).SaveOAuth2OneTime), ctx, oneTime)
 }
 
 // SaveOAuth2Session mocks base method.

@@ -378,6 +378,18 @@ type Provider interface {
 	// LoadOAuth2BlacklistedJTI loads an OAuth2.0 blacklisted JTI for a client from the storage provider.
 	LoadOAuth2BlacklistedJTI(ctx context.Context, clientID, signature string) (blacklistedJTI *model.OAuth2BlacklistedJTI, err error)
 
+	// SaveOAuth2OneTime atomically records that a declared single-use value was consumed. It returns ErrNoRowsAffected
+	// when the value is already recorded and has not expired.
+	SaveOAuth2OneTime(ctx context.Context, oneTime model.OAuth2OneTime) (err error)
+
+	// ConsumeOAuth2OneTime atomically consumes a declared single-use value. Registration and consumption are the same
+	// storage operation so a caller can not accidentally use a value without registering it first. The value may be a
+	// model.OAuth2OneTime or a model.OAuth2OneTimeType followed by the client id, value or signature, and expiry.
+	ConsumeOAuth2OneTime(ctx context.Context, oneTime any, args ...any) (err error)
+
+	// IsOAuth2OneTimeConsumed returns true when a declared single-use value has an active consumption record.
+	IsOAuth2OneTimeConsumed(ctx context.Context, oneTimeType model.OAuth2OneTimeType, clientID, signature string) (consumed bool, err error)
+
 	// SaveOAuth2RequestReplay atomically records a value of an authorization request which may only be used once by a
 	// client. It returns ErrNoRowsAffected when the value is already recorded for the client and has not expired.
 	SaveOAuth2RequestReplay(ctx context.Context, replay model.OAuth2RequestReplay) (err error)

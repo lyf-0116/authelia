@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/authelia/authelia/v4/internal/configuration/schema"
+	"github.com/authelia/authelia/v4/internal/model"
 )
 
 func TestSchemaMigrateBackfillsRefreshTokenAccessSignature(t *testing.T) {
@@ -143,6 +144,65 @@ func TestSchemaMigrateRemovesDuplicateDeviceCodeSessions(t *testing.T) {
 			require.NoError(t, provider.db.GetContext(ctx, &count, "SELECT COUNT(*) FROM oauth2_device_code_session WHERE id = ?;", tc.id))
 
 			assert.Equal(t, tc.expected, count == 1)
+		})
+	}
+}
+
+func TestSchemaMigrateBackfillsOAuth2OneTimeConsumption(t *testing.T) {
+	config := &schema.Configuration{
+		Storage: schema.Storage{
+			EncryptionKey: "authelia-test-key-not-a-secret-authelia-test-key-not-a-secret",
+			Local:         &schema.StorageLocal{Path: filepath.Join(t.TempDir(), "db.sqlite3")},
+		},
+	}
+
+	ctx := context.Background()
+
+	provider, err := NewSQLiteProvider(config)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = provider.Close()
+	})
+
+	require.NoError(t, provider.SchemaMigrate(ctx, true, 34))
+
+	seedAuthorizeCode := `INSERT INTO oauth2_authorization_code_session (challenge_id, request_id, client_id, signature, subject, requested_scopes, granted_scopes, active, revoked, form_data, session_data) VALUES ('challenge', 'request', 'client', ?, 'subject', '', '', ?, ?, '', '');`
+	seedPAR := `INSERT INTO oauth2_par_context (signature, request_id, client_id, scopes, audience, handled_response_types, response_mode, response_mode_default, revoked, form_data, session_data) VALUES (?, 'request', 'client', '', '', '', '', '', ?, '', '');`
+
+	for _, seed := range []struct {
+		query string
+		args  []any
+	}{
+		{seedAuthorizeCode, []any{"ac_consumed", false, false}},
+		{seedAuthorizeCode, []any{"ac_revoked", true, true}},
+		{seedAuthorizeCode, []any{"ac_active", true, false}},
+		{seedPAR, []any{"par_consumed", true}},
+		{seedPAR, []any{"par_active", false}},
+	} {
+		_, err = provider.db.ExecContext(ctx, seed.query, seed.args...)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, provider.SchemaMigrate(ctx, true, 35))
+
+	for _, tc := range []struct {
+		name      string
+		oneTime   model.OAuth2OneTimeType
+		clientID  string
+		signature string
+		consumed  bool
+	}{
+		{"ShouldBackfillConsumedAuthorizeCode", model.OAuth2OneTimeTypeAuthorizeCode, "", "ac_consumed", true},
+		{"ShouldBackfillRevokedAuthorizeCode", model.OAuth2OneTimeTypeAuthorizeCode, "", "ac_revoked", true},
+		{"ShouldNotBackfillActiveAuthorizeCode", model.OAuth2OneTimeTypeAuthorizeCode, "", "ac_active", false},
+		{"ShouldBackfillRevokedPAR", model.OAuth2OneTimeTypePushedAuthorizationRequest, "", "par_consumed", true},
+		{"ShouldNotBackfillActivePAR", model.OAuth2OneTimeTypePushedAuthorizationRequest, "", "par_active", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			consumed, err := provider.IsOAuth2OneTimeConsumed(ctx, tc.oneTime, tc.clientID, tc.signature)
+			require.NoError(t, err)
+			assert.Equal(t, tc.consumed, consumed)
 		})
 	}
 }

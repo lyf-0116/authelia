@@ -173,8 +173,10 @@ func NewSQLProvider(config *schema.Configuration, name, driverName, dataSourceNa
 		sqlUpdateExternalIdentityLinkSignIn:          fmt.Sprintf(queryFmtUpdateExternalIdentityLinkSignIn, tableUserExternalIdentityLinks),
 		sqlDeleteExternalIdentityLinkByUsernameAndID: fmt.Sprintf(queryFmtDeleteExternalIdentityLinkByUsernameAndID, tableUserExternalIdentityLinks),
 
-		sqlInsertOAuth2BlacklistedJTI: fmt.Sprintf(queryFmtInsertOAuth2BlacklistedJTI, tableOAuth2BlacklistedJTI),
-		sqlInsertOAuth2RequestReplay:  fmt.Sprintf(queryFmtInsertOAuth2RequestReplay, tableOAuth2RequestReplay),
+		sqlInsertOAuth2BlacklistedJTI:  fmt.Sprintf(queryFmtInsertOAuth2BlacklistedJTI, tableOAuth2BlacklistedJTI),
+		sqlInsertOAuth2RequestReplay:   fmt.Sprintf(queryFmtInsertOAuth2RequestReplay, tableOAuth2RequestReplay),
+		sqlSelectOAuth2OneTimeConsumed: fmt.Sprintf(queryFmtSelectOAuth2OneTimeConsumed, tableOAuth2RequestReplay),
+		sqlDeleteOAuth2OneTime:         fmt.Sprintf(queryFmtDeleteOAuth2OneTime, tableOAuth2RequestReplay),
 
 		sqlUpdateOAuth2RefreshTokenSessionRequest: fmt.Sprintf(queryFmtUpdateOAuth2RefreshTokenSessionRequest, tableOAuth2RefreshTokenSession),
 		sqlDecideOAuth2DeviceCodeSession:          fmt.Sprintf(queryFmtDecideOAuth2DeviceCodeSession, tableOAuth2DeviceCodeSession),
@@ -465,8 +467,10 @@ type SQLProvider struct {
 	sqlDeactivateOAuth2RefreshTokenSession            string
 	sqlDeactivateOAuth2RefreshTokenSessionByRequestID string
 
-	sqlInsertOAuth2BlacklistedJTI string
-	sqlInsertOAuth2RequestReplay  string
+	sqlInsertOAuth2BlacklistedJTI  string
+	sqlInsertOAuth2RequestReplay   string
+	sqlSelectOAuth2OneTimeConsumed string
+	sqlDeleteOAuth2OneTime         string
 
 	sqlUpdateOAuth2RefreshTokenSessionRequest string
 	sqlDecideOAuth2DeviceCodeSession          string
@@ -1631,6 +1635,14 @@ func (p *SQLProvider) DeactivateOAuth2Session(ctx context.Context, sessionType O
 		return fmt.Errorf("error deactivating oauth2 %s session with signature '%s': %w", sessionType, signature, err)
 	}
 
+	if oneTimeType, ok := sessionType.OneTime(); ok {
+		oneTime := model.NewOAuth2OneTimeFromSignature(oneTimeType, "", signature, time.Time{})
+
+		if err = p.consumeOAuth2OneTime(ctx, oneTime); err != nil {
+			return fmt.Errorf("error deactivating oauth2 %s session with signature '%s': %w", sessionType, signature, err)
+		}
+	}
+
 	return nil
 }
 
@@ -1864,6 +1876,13 @@ func (p *SQLProvider) RevokeOAuth2PushedAuthorizationSession(ctx context.Context
 		return fmt.Errorf("error revoking oauth2 pushed authorization request session with signature '%s': %w", signature, err)
 	}
 
+	oneTimeType, _ := OAuth2SessionTypePAR.OneTime()
+	oneTime := model.NewOAuth2OneTimeFromSignature(oneTimeType, "", signature, time.Time{})
+
+	if err = p.consumeOAuth2OneTime(ctx, oneTime); err != nil {
+		return fmt.Errorf("error revoking oauth2 pushed authorization request session with signature '%s': %w", signature, err)
+	}
+
 	return nil
 }
 
@@ -1887,6 +1906,14 @@ func (p *SQLProvider) UpdateOAuth2PushedAuthorizationSession(ctx context.Context
 
 	if err = checkSingleUpdateResult(result); err != nil {
 		return fmt.Errorf("error updating oauth2 pushed authorization request session data with id '%d' and signature '%s' and request id '%s': %w", par.ID, par.Signature, par.RequestID, err)
+	}
+
+	if !par.Revoked {
+		oneTimeType, _ := OAuth2SessionTypePAR.OneTime()
+
+		if err = p.removeOAuth2OneTime(ctx, oneTimeType, par.Signature); err != nil {
+			return fmt.Errorf("error reactivating oauth2 pushed authorization request session data with id '%d' and signature '%s' and request id '%s': %w", par.ID, par.Signature, par.RequestID, err)
+		}
 	}
 
 	return nil
@@ -1919,21 +1946,195 @@ func (p *SQLProvider) LoadOAuth2BlacklistedJTI(ctx context.Context, clientID, si
 	return blacklistedJTI, nil
 }
 
+// SaveOAuth2OneTime atomically records a declared single-use value. It returns ErrNoRowsAffected when the value is
+// already recorded and has not expired.
+func (p *SQLProvider) SaveOAuth2OneTime(ctx context.Context, oneTime model.OAuth2OneTime) (err error) {
+	return p.saveOAuth2OneTime(ctx, oneTime, "error consuming oauth2 one-time value of type '%s' with signature '%s' for client '%s'")
+}
+
+// ConsumeOAuth2OneTime atomically consumes a declared single-use value. The value may be a model.OAuth2OneTime or a
+// model.OAuth2OneTimeType followed by the client id, value, and expiry.
+func (p *SQLProvider) ConsumeOAuth2OneTime(ctx context.Context, oneTime any, args ...any) (err error) {
+	var value model.OAuth2OneTime
+
+	if value, err = oauth2OneTime(oneTime, args...); err != nil {
+		return err
+	}
+
+	return p.saveOAuth2OneTime(ctx, value, "error consuming oauth2 one-time value of type '%s' with signature '%s' for client '%s'")
+}
+
+// IsOAuth2OneTimeConsumed returns true when a declared single-use value has an active consumption record.
+func (p *SQLProvider) IsOAuth2OneTimeConsumed(ctx context.Context, oneTimeType model.OAuth2OneTimeType, clientID, signature string) (consumed bool, err error) {
+	var (
+		declaration model.OAuth2OneTimeDeclaration
+		count       int
+	)
+
+	if declaration, err = oauth2OneTimeDeclaration(oneTimeType); err != nil {
+		return false, err
+	}
+
+	if declaration.KeyScope == model.OAuth2OneTimeKeyScopeSignature {
+		clientID = ""
+	}
+
+	if err = p.conn(ctx).GetContext(ctx, &count, p.sqlSelectOAuth2OneTimeConsumed, oneTimeType, clientID, signature, time.Now().UTC()); err != nil {
+		return false, fmt.Errorf("error selecting oauth2 one-time value of type '%s' with signature '%s' for client '%s': %w", oneTimeType, signature, clientID, err)
+	}
+
+	return count > 0, nil
+}
+
 // SaveOAuth2RequestReplay atomically records a value of an authorization request which may only be used once by a
 // client, such as a PKCE code challenge or an OpenID Connect nonce. It returns ErrNoRowsAffected when the value is
 // already recorded for the client and has not expired.
 func (p *SQLProvider) SaveOAuth2RequestReplay(ctx context.Context, replay model.OAuth2RequestReplay) (err error) {
-	var result sql.Result
+	return p.saveOAuth2OneTime(ctx, replay, "error inserting oauth2 request replay of type '%s' with signature '%s' for client '%s'")
+}
 
-	if result, err = p.conn(ctx).ExecContext(ctx, p.sqlInsertOAuth2RequestReplay, replay.Type, replay.ClientID, replay.Signature, replay.ExpiresAt.UTC(), time.Now().UTC()); err != nil {
-		return fmt.Errorf("error inserting oauth2 request replay of type '%s' with signature '%s' for client '%s': %w", replay.Type, replay.Signature, replay.ClientID, err)
-	}
-
-	if err = checkInsertResult(result); err != nil {
-		return fmt.Errorf("error inserting oauth2 request replay of type '%s' with signature '%s' for client '%s': %w", replay.Type, replay.Signature, replay.ClientID, err)
+func (p *SQLProvider) saveOAuth2OneTime(ctx context.Context, oneTime model.OAuth2OneTime, format string) (err error) {
+	if err = p.consumeOAuth2OneTime(ctx, oneTime); err != nil {
+		return fmt.Errorf(format+": %w", oneTime.Type, oneTime.Signature, oneTime.ClientID, err)
 	}
 
 	return nil
+}
+
+func (p *SQLProvider) consumeOAuth2OneTime(ctx context.Context, oneTime model.OAuth2OneTime) (err error) {
+	var (
+		declaration model.OAuth2OneTimeDeclaration
+		result      sql.Result
+	)
+
+	if declaration, err = oauth2OneTimeDeclaration(oneTime.Type); err != nil {
+		return err
+	}
+
+	if declaration.KeyScope == model.OAuth2OneTimeKeyScopeSignature {
+		oneTime.ClientID = ""
+	}
+
+	if oneTime.ExpiresAt.IsZero() {
+		oneTime.ExpiresAt = time.Now().Add(declaration.Retention)
+	}
+
+	if result, err = p.conn(ctx).ExecContext(ctx, p.sqlInsertOAuth2RequestReplay, oneTime.Type, oneTime.ClientID, oneTime.Signature, oneTime.ExpiresAt.UTC(), time.Now().UTC()); err != nil {
+		return err
+	}
+
+	if err = checkInsertResult(result); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *SQLProvider) removeOAuth2OneTime(ctx context.Context, oneTimeType model.OAuth2OneTimeType, signature string) (err error) {
+	var declaration model.OAuth2OneTimeDeclaration
+
+	if declaration, err = oauth2OneTimeDeclaration(oneTimeType); err != nil {
+		return err
+	}
+
+	if _, err = p.conn(ctx).ExecContext(ctx, p.sqlDeleteOAuth2OneTime, oneTimeType, "", signature); err != nil {
+		return fmt.Errorf("error deleting oauth2 one-time value of type '%s' with signature '%s': %w", declaration.Type, signature, err)
+	}
+
+	return nil
+}
+
+func oauth2OneTimeDeclaration(oneTimeType model.OAuth2OneTimeType) (declaration model.OAuth2OneTimeDeclaration, err error) {
+	var ok bool
+
+	if declaration, ok = oneTimeType.Declaration(); !ok {
+		return declaration, fmt.Errorf("%w: '%s'", ErrOAuth2OneTimeTypeNotDeclared, oneTimeType)
+	}
+
+	return declaration, nil
+}
+
+func oauth2OneTime(value any, args ...any) (oneTime model.OAuth2OneTime, err error) {
+	switch v := value.(type) {
+	case model.OAuth2OneTime:
+		return v, nil
+	case *model.OAuth2OneTime:
+		if v == nil {
+			return oneTime, fmt.Errorf("error consuming oauth2 one-time value: the value was nil")
+		}
+
+		return *v, nil
+	case model.OAuth2OneTimeType:
+		return oauth2OneTimeValues(v, args...)
+	case string:
+		return oauth2OneTimeValues(model.OAuth2OneTimeType(v), args...)
+	default:
+		return oneTime, fmt.Errorf("error consuming oauth2 one-time value: unknown value type '%T'", value)
+	}
+}
+
+func oauth2OneTimeValues(oneTimeType model.OAuth2OneTimeType, args ...any) (oneTime model.OAuth2OneTime, err error) {
+	var (
+		clientID string
+		value    string
+		expires  time.Time
+	)
+
+	if !oneTimeType.Declared() {
+		return oneTime, fmt.Errorf("%w: '%s'", ErrOAuth2OneTimeTypeNotDeclared, oneTimeType)
+	}
+
+	switch len(args) {
+	case 0:
+		return oneTime, fmt.Errorf("error consuming oauth2 one-time value of type '%s': the value was missing", oneTimeType)
+	case 1:
+		if value, err = oauth2OneTimeString(args[0]); err != nil {
+			return oneTime, err
+		}
+	case 2:
+		if expires, ok := args[1].(time.Time); ok {
+			if value, err = oauth2OneTimeString(args[0]); err != nil {
+				return oneTime, err
+			}
+
+			return model.NewOAuth2OneTime(oneTimeType, "", value, expires), nil
+		}
+
+		if clientID, err = oauth2OneTimeString(args[0]); err != nil {
+			return oneTime, err
+		}
+
+		if value, err = oauth2OneTimeString(args[1]); err != nil {
+			return oneTime, err
+		}
+	case 3:
+		if clientID, err = oauth2OneTimeString(args[0]); err != nil {
+			return oneTime, err
+		}
+
+		if value, err = oauth2OneTimeString(args[1]); err != nil {
+			return oneTime, err
+		}
+
+		if expires, ok := args[2].(time.Time); ok {
+			return model.NewOAuth2OneTime(oneTimeType, clientID, value, expires), nil
+		}
+
+		return oneTime, fmt.Errorf("error consuming oauth2 one-time value of type '%s': the expiry was not a time.Time", oneTimeType)
+	default:
+		return oneTime, fmt.Errorf("error consuming oauth2 one-time value of type '%s': too many arguments", oneTimeType)
+	}
+
+	return model.NewOAuth2OneTime(oneTimeType, clientID, value, expires), nil
+}
+
+func oauth2OneTimeString(value any) (s string, err error) {
+	switch v := value.(type) {
+	case string:
+		return v, nil
+	default:
+		return "", fmt.Errorf("error consuming oauth2 one-time value: expected a string but got '%T'", value)
+	}
 }
 
 // AppendAuthenticationLog saves an authentication attempt to the storage provider.

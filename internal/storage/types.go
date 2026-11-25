@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/rpadovani/sqlx-v2"
+
+	"github.com/authelia/authelia/v4/internal/model"
 )
 
 // SQLXDB represents a *sqlx.DB allowing for mocks.
@@ -290,6 +292,19 @@ func (s OAuth2SessionType) Table() string {
 	default:
 		return ""
 	}
+}
+
+var oauth2SessionTypeOneTime = map[OAuth2SessionType]model.OAuth2OneTimeType{
+	OAuth2SessionTypeAuthorizeCode: model.OAuth2OneTimeTypeAuthorizeCode,
+	OAuth2SessionTypePAR:           model.OAuth2OneTimeTypePushedAuthorizationRequest,
+}
+
+// OneTime returns the single-use declaration type for this session type and true when the session may only be used
+// once. Adding a new single-use session type only requires adding it to this declaration.
+func (s OAuth2SessionType) OneTime() (oneTimeType model.OAuth2OneTimeType, ok bool) {
+	oneTimeType, ok = oauth2SessionTypeOneTime[s]
+
+	return oneTimeType, ok
 }
 
 type sessionRow struct {

@@ -63,15 +63,43 @@ func NewOAuth2BlacklistedJTISignature(jti string) (signature string) {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(jti)))
 }
 
-// NewOAuth2RequestReplay creates a new OAuth2RequestReplay which records that a client used a value of the given type
+// NewOAuth2OneTime creates a new OAuth2OneTime which records that a single-use value of the given type was consumed
 // until the given expiry. The value is stored as a digest.
-func NewOAuth2RequestReplay(replayType OAuth2RequestReplayType, clientID, value string, exp time.Time) (replay OAuth2RequestReplay) {
-	return OAuth2RequestReplay{
-		Type:      replayType,
+func NewOAuth2OneTime(oneTimeType OAuth2OneTimeType, clientID, value string, exp time.Time) (oneTime OAuth2OneTime) {
+	declaration, _ := oneTimeType.Declaration()
+
+	if declaration.KeyScope == OAuth2OneTimeKeyScopeSignature {
+		clientID = ""
+	}
+
+	return OAuth2OneTime{
+		Type:      oneTimeType,
 		ClientID:  clientID,
 		Signature: fmt.Sprintf("%x", sha256.Sum256([]byte(value))),
 		ExpiresAt: exp,
 	}
+}
+
+// NewOAuth2OneTimeFromSignature creates a new OAuth2OneTime from an already digested signature.
+func NewOAuth2OneTimeFromSignature(oneTimeType OAuth2OneTimeType, clientID, signature string, exp time.Time) (oneTime OAuth2OneTime) {
+	declaration, _ := oneTimeType.Declaration()
+
+	if declaration.KeyScope == OAuth2OneTimeKeyScopeSignature {
+		clientID = ""
+	}
+
+	return OAuth2OneTime{
+		Type:      oneTimeType,
+		ClientID:  clientID,
+		Signature: signature,
+		ExpiresAt: exp,
+	}
+}
+
+// NewOAuth2RequestReplay creates a new OAuth2RequestReplay which records that a client used a value of the given type
+// until the given expiry. The value is stored as a digest.
+func NewOAuth2RequestReplay(replayType OAuth2RequestReplayType, clientID, value string, exp time.Time) (replay OAuth2RequestReplay) {
+	return NewOAuth2OneTime(replayType, clientID, value, exp)
 }
 
 // NewOAuth2SessionFromRequest creates a new OAuth2Session from a signature and oauthelia2.Requester.
@@ -502,25 +530,122 @@ const (
 	OAuth2DeviceCodeStatusClaimed = int(oauthelia2.DeviceAuthorizeStatusClaimed)
 )
 
-// OAuth2RequestReplayType is the type of value an OAuth2RequestReplay records.
-type OAuth2RequestReplayType string
+// OAuth2OneTimeType is the type of single-use value an OAuth2OneTime records. Every type which may only be used once
+// must be declared here so the storage layer can enforce the single-use invariant consistently.
+type OAuth2OneTimeType string
 
 const (
-	// OAuth2RequestReplayTypePKCEChallenge records a PKCE 'code_challenge'.
-	OAuth2RequestReplayTypePKCEChallenge OAuth2RequestReplayType = "pkce_challenge"
+	// OAuth2OneTimeTypeAuthorizeCode records a single-use OAuth 2.0 authorization code.
+	OAuth2OneTimeTypeAuthorizeCode OAuth2OneTimeType = "authorize_code"
 
-	// OAuth2RequestReplayTypeOpenIDConnectNonce records an OpenID Connect 'nonce'.
-	OAuth2RequestReplayTypeOpenIDConnectNonce OAuth2RequestReplayType = "openid_connect_nonce"
+	// OAuth2OneTimeTypePushedAuthorizationRequest records a single-use pushed authorization request.
+	OAuth2OneTimeTypePushedAuthorizationRequest OAuth2OneTimeType = "pushed_authorization_request"
+
+	// OAuth2OneTimeTypePKCEChallenge records a PKCE 'code_challenge'.
+	OAuth2OneTimeTypePKCEChallenge OAuth2OneTimeType = "pkce_challenge"
+
+	// OAuth2OneTimeTypeOpenIDConnectNonce records an OpenID Connect 'nonce'.
+	OAuth2OneTimeTypeOpenIDConnectNonce OAuth2OneTimeType = "openid_connect_nonce"
 )
 
-// OAuth2RequestReplay represents a value of an authorization request a client may only use once until it expires.
-type OAuth2RequestReplay struct {
-	ID        int                     `db:"id"`
-	Type      OAuth2RequestReplayType `db:"type"`
-	ClientID  string                  `db:"client_id"`
-	Signature string                  `db:"signature"`
-	ExpiresAt time.Time               `db:"expires_at"`
+const (
+	// OAuth2OneTimeTypeAuthorizationCode is an alias for OAuth2OneTimeTypeAuthorizeCode.
+	OAuth2OneTimeTypeAuthorizationCode = OAuth2OneTimeTypeAuthorizeCode
+
+	// OAuth2OneTimeTypePAR is an alias for OAuth2OneTimeTypePushedAuthorizationRequest.
+	OAuth2OneTimeTypePAR = OAuth2OneTimeTypePushedAuthorizationRequest
+
+	// OAuth2RequestReplayTypePKCEChallenge records a PKCE 'code_challenge'.
+	OAuth2RequestReplayTypePKCEChallenge = OAuth2OneTimeTypePKCEChallenge
+
+	// OAuth2RequestReplayTypeOpenIDConnectNonce records an OpenID Connect 'nonce'.
+	OAuth2RequestReplayTypeOpenIDConnectNonce = OAuth2OneTimeTypeOpenIDConnectNonce
+)
+
+// OAuth2OneTimeKeyScope describes which values identify a single-use row.
+type OAuth2OneTimeKeyScope int
+
+const (
+	// OAuth2OneTimeKeyScopeSignature identifies a row by its signature alone.
+	OAuth2OneTimeKeyScopeSignature OAuth2OneTimeKeyScope = iota
+
+	// OAuth2OneTimeKeyScopeClientSignature identifies a row by the client id and signature.
+	OAuth2OneTimeKeyScopeClientSignature
+)
+
+// OAuth2OneTimeDeclaration declares the lifecycle of a single-use value. The declaration is the single source of
+// truth for how the storage layer keys, retains, and consumes a type.
+type OAuth2OneTimeDeclaration struct {
+	Type              OAuth2OneTimeType
+	Description       string
+	KeyScope          OAuth2OneTimeKeyScope
+	RegisteredAtIssue bool
+	Retention         time.Duration
 }
+
+var oauth2OneTimeDeclarations = map[OAuth2OneTimeType]OAuth2OneTimeDeclaration{
+	OAuth2OneTimeTypeAuthorizeCode: {
+		Type:              OAuth2OneTimeTypeAuthorizeCode,
+		Description:       "OAuth 2.0 authorization code",
+		KeyScope:          OAuth2OneTimeKeyScopeSignature,
+		RegisteredAtIssue: true,
+		Retention:         time.Hour * 24,
+	},
+	OAuth2OneTimeTypePushedAuthorizationRequest: {
+		Type:              OAuth2OneTimeTypePushedAuthorizationRequest,
+		Description:       "OAuth 2.0 pushed authorization request",
+		KeyScope:          OAuth2OneTimeKeyScopeSignature,
+		RegisteredAtIssue: true,
+		Retention:         time.Hour * 24,
+	},
+	OAuth2OneTimeTypePKCEChallenge: {
+		Type:        OAuth2OneTimeTypePKCEChallenge,
+		Description: "PKCE code challenge",
+		KeyScope:    OAuth2OneTimeKeyScopeClientSignature,
+		Retention:   time.Hour,
+	},
+	OAuth2OneTimeTypeOpenIDConnectNonce: {
+		Type:        OAuth2OneTimeTypeOpenIDConnectNonce,
+		Description: "OpenID Connect nonce",
+		KeyScope:    OAuth2OneTimeKeyScopeClientSignature,
+		Retention:   time.Hour,
+	},
+}
+
+// Declaration returns the declaration for this type and a boolean indicating if the type is declared.
+func (t OAuth2OneTimeType) Declaration() (declaration OAuth2OneTimeDeclaration, ok bool) {
+	declaration, ok = oauth2OneTimeDeclarations[t]
+
+	return declaration, ok
+}
+
+// Declared returns true if this type is declared as a single-use value.
+func (t OAuth2OneTimeType) Declared() bool {
+	_, ok := t.Declaration()
+
+	return ok
+}
+
+// String returns the storage representation of this OAuth2OneTimeType.
+func (t OAuth2OneTimeType) String() string {
+	return string(t)
+}
+
+// OAuth2OneTime represents a single-use value which was consumed at the recorded time. The storage layer uses the
+// row itself as the consumption ledger: once a row exists and has not expired the value can no longer be used.
+type OAuth2OneTime struct {
+	ID        int               `db:"id"`
+	Type      OAuth2OneTimeType `db:"type"`
+	ClientID  string            `db:"client_id"`
+	Signature string            `db:"signature"`
+	ExpiresAt time.Time         `db:"expires_at"`
+}
+
+// OAuth2RequestReplayType is the type of value an OAuth2RequestReplay records.
+type OAuth2RequestReplayType = OAuth2OneTimeType
+
+// OAuth2RequestReplay represents a value of an authorization request a client may only use once until it expires.
+type OAuth2RequestReplay = OAuth2OneTime
 
 // OAuth2Session represents a OAuth2.0 session.
 type OAuth2Session struct {
